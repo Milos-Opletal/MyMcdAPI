@@ -2,9 +2,11 @@
 
 An unofficial Python client and utility library for the [MyMcd](https://mymcd.eu) employee portal used by McDonald's Czech Republic & Slovakia. Provides programmatic access to shift plans, employee profiles, training verifications, restaurant floorplans, and Google Calendar / SQLite shift syncing.
 
-## Key Features
+---
 
-- **Automated Session & Cookie Authentication**: Seamlessly handles authentication across `mymcd.eu` and `next.mymcd.eu`, managing dual `PHPSESSID` and `mymcd2_session` tokens.
+## Features
+
+- **Automated Session & Cookie Authentication**: Handles authentication across `mymcd.eu` and `next.mymcd.eu`, managing dual `PHPSESSID` and `mymcd2_session` tokens.
 - **Role-Based Access Control**: Enforces permissions via `@requires_role` decorators (`CREW`, `CT`, `MANAGER`) matching portal security rules.
 - **Dynamic Context Resolution**: Automatically populates `user_id`, `role`, `restaurant_id`, and `restaurant_code` upon login.
 - **Rich Verification Engine**: Extracts training status, dates, and attempt IDs (points, evaluator names) with concurrent worker support.
@@ -12,9 +14,13 @@ An unofficial Python client and utility library for the [MyMcd](https://mymcd.eu
 
 ---
 
-## Installation & Requirements
+## Prerequisites
 
 - **Python 3.10+**
+
+---
+
+## Installation
 
 ```bash
 git clone https://github.com/Milos-Opletal/MyMcdAPI.git
@@ -22,22 +28,18 @@ cd MyMcdAPI
 pip install -r requirements.txt
 ```
 
-### Dependencies
-- `requests`
-- `beautifulsoup4`
-- `python-dotenv`
-
 ---
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in your McDonald's portal credentials:
+Copy `.env.example` to `.env`:
 
 ```bash
 cp .env.example .env
 ```
 
 ```env
+# Required: McDonald's API credentials
 MYMCD_EMAIL=your_email@example.com
 MYMCD_PASSWORD=your_password_here
 ```
@@ -62,7 +64,7 @@ api.login()
 me = api.get_me()
 print(f"Logged in as: {me.get('fullName')} | Role: {api.role.name}")
 
-# Fetch your shifts for the current month
+# Fetch shifts for a date range
 shifts = api.get_employee_shifts("2026-04-01", "2026-04-30")
 print(f"Found {len(shifts.get('shiftPlans', []))} shifts.")
 ```
@@ -120,4 +122,4 @@ for c in coworkers:
 
 ## Disclaimer
 
-This project is an independent tool created for internal shift synchronization and analytics. It is not affiliated with, maintained, or endorsed by McDonald's Corporation. Use responsibly in accordance with platform terms of use.
+This project is an independent tool developed for shift synchronization and operational analytics. It is not affiliated with, endorsed by, or sponsored by McDonald's Corporation.
