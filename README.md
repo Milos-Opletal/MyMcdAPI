@@ -1,91 +1,52 @@
 # MyMcdAPI
 
-An unofficial Python wrapper for the [MyMcd](https://mymcd.eu) employee portal used by McDonald's CZ/SK. It provides programmatic access to shift schedules, employee data, training verifications, and more — all through clean, role-aware method calls.
+An unofficial Python client and utility library for the [MyMcd](https://mymcd.eu) employee portal used by McDonald's Czech Republic & Slovakia. Provides programmatic access to shift plans, employee profiles, training verifications, restaurant floorplans, and Google Calendar / SQLite shift syncing.
 
-## Features
+## Key Features
 
-- **Session-based authentication** — logs in via the MyMcd web portal and manages cookies automatically
-- **Role-based access control** — endpoints are guarded by a `@requires_role` decorator (`CREW`, `CT`, `MANAGER`) that mirrors the portal's permission model
-- **Automatic context setup** — after login, your user ID, restaurant ID, and role are resolved automatically from `/api/user/me`
-- **Shift Manager module** — includes `McdShiftManager`, a higher-level utility that syncs shifts to a local SQLite database for offline queries
+- **Automated Session & Cookie Authentication**: Seamlessly handles authentication across `mymcd.eu` and `next.mymcd.eu`, managing dual `PHPSESSID` and `mymcd2_session` tokens.
+- **Role-Based Access Control**: Enforces permissions via `@requires_role` decorators (`CREW`, `CT`, `MANAGER`) matching portal security rules.
+- **Dynamic Context Resolution**: Automatically populates `user_id`, `role`, `restaurant_id`, and `restaurant_code` upon login.
+- **Rich Verification Engine**: Extracts training status, dates, and attempt IDs (points, evaluator names) with concurrent worker support.
+- **Shift Manager Module**: Includes `McdShiftManager` to synchronize restaurant floorplans and shifts to SQLite for fast offline queries and coworker overlap detection.
 
-### Available Endpoints
+---
 
-| Method | Min. Role | Description |
-|--------|-----------|-------------|
-| `get_me()` | CREW | Get your own profile & access data |
-| `get_default_codes()` | CREW | Fetch global definitions (positions, verifications, etc.) |
-| `get_events(from, to)` | CREW | Fetch events like holidays / 2× pay days |
-| `get_employee_details(id)` | CREW | Get details for a specific employee |
-| `get_employees_data_list()` | CREW | Paginated employee list for your restaurant |
-| `get_employee_shifts(from, to)` | CREW* | Fetch shift plans (MANAGER required for other employees) |
-| `get_profile_verifications()` | CREW* | Fetch training verifications (CT required for other employees) |
-| `get_restaurant_shifts(from, to)` | MANAGER | All shifts for the entire restaurant |
-| `get_restaurant_floorplan(date)` | MANAGER | Floor plan for a specific date |
-| `get_restaurant_availability(from, to)` | MANAGER | Employee availability overview |
-| `get_employee_shift_stats(year, month, ids)` | MANAGER | Shift statistics for specific employees |
-| `get_expiring_verifications(from, to, ids)` | MANAGER | Expiring training verifications |
+## Installation & Requirements
 
-## Prerequisites
-
-- **Python 3.9+**
-- A valid **MyMcd account** (employee login at [mymcd.eu](https://mymcd.eu))
-
-### Python Dependencies
-
-```
-requests
-beautifulsoup4
-python-dotenv
-```
-
-Install them with:
+- **Python 3.10+**
 
 ```bash
-pip install requests beautifulsoup4 python-dotenv
+git clone https://github.com/Milos-Opletal/MyMcdAPI.git
+cd MyMcdAPI
+pip install -r requirements.txt
 ```
 
-## Setup
+### Dependencies
+- `requests`
+- `beautifulsoup4`
+- `python-dotenv`
 
-1. **Clone the repository**
+---
 
-   ```bash
-   git clone https://github.com/Milos-Opletal/MyMcdAPI.git
-   cd MyMcdAPI
-   ```
+## Configuration
 
-2. **Create a `.env` file** in the project root with your MyMcd credentials:
+Copy `.env.example` to `.env` and fill in your McDonald's portal credentials:
 
-   ```env
-   MYMCD_EMAIL=your_email@example.com
-   MYMCD_PASSWORD=your_password
-   ```
-
-3. **Install dependencies**
-
-   ```bash
-   pip install requests beautifulsoup4 python-dotenv
-   ```
-
-## Usage
-
-### Basic API Usage
-
-```python
-from MyMcdAPI import MyMcdAPI
-
-api = MyMcdAPI("your_email@example.com", "your_password")
-api.login()
-
-# Your profile
-me = api.get_me()
-print(f"Logged in as: {me['fullName']} (Role: {api.role.name})")
-
-# Your shifts for a date range
-shifts = api.get_employee_shifts("2026-04-01", "2026-04-30")
+```bash
+cp .env.example .env
 ```
 
-### Using Environment Variables (Recommended)
+```env
+MYMCD_EMAIL=your_email@example.com
+MYMCD_PASSWORD=your_password_here
+```
+
+---
+
+## Quickstart
+
+### 1. Basic API Usage
 
 ```python
 import os
@@ -96,30 +57,67 @@ load_dotenv()
 
 api = MyMcdAPI(os.environ["MYMCD_EMAIL"], os.environ["MYMCD_PASSWORD"])
 api.login()
+
+# Current user details
+me = api.get_me()
+print(f"Logged in as: {me.get('fullName')} | Role: {api.role.name}")
+
+# Fetch your shifts for the current month
+shifts = api.get_employee_shifts("2026-04-01", "2026-04-30")
+print(f"Found {len(shifts.get('shiftPlans', []))} shifts.")
 ```
 
-### Shift Manager
-
-The `McdShiftManager` syncs restaurant-wide shifts to a local SQLite database and provides helper queries:
+### 2. Shift Manager (SQLite Sync & Coworker Queries)
 
 ```python
+import os
+from dotenv import load_dotenv
+from MyMcdAPI import MyMcdAPI
 from McdShiftManager import McdShiftManager
 
-manager = McdShiftManager(api)
+load_dotenv()
 
-# Sync all shifts for March 2026
-manager.sync_shifts("2026-03-01", "2026-03-31")
+api = MyMcdAPI(os.environ["MYMCD_EMAIL"], os.environ["MYMCD_PASSWORD"])
+api.login()
 
-# Who is RS / OS / NS today?
-roles = manager.get_special_roles("2026-03-29")
-print(roles)  # {'RS': 'John Doe', 'OS': 'Jane Doe', 'NS': None}
+manager = McdShiftManager(api, db_path="mymcd_shifts.sqlite")
 
-# Who else is working at the same time as you?
-coworkers = manager.get_coworker_shift_times(user_id=api.user_id, date="2026-03-29")
+# Sync all restaurant shifts for a date range (Manager access required)
+manager.sync_shifts("2026-04-01", "2026-04-30")
+
+# Query special supervisor roles (RS, OS, NS) for a specific date
+roles = manager.get_special_roles("2026-04-15")
+print(roles)  # {'RS': 'Jan Novak', 'OS': 'Petra Svobodova', 'NS': None}
+
+# Find coworkers on shift at the same time as you
+coworkers = manager.get_coworker_shift_times(user_id=api.user_id, date="2026-04-15")
 for c in coworkers:
     print(f"{c['full_name']}: {c['start_time']} - {c['end_time']}")
 ```
 
+---
+
+## API Endpoints Reference
+
+| Method | Minimum Role | Description |
+|--------|--------------|-------------|
+| `get_me()` | `CREW` | Current authenticated user profile and restaurant context |
+| `get_default_codes()` | `CREW` | Global definitions (positions, verifications, stations) |
+| `get_events(from_date, to_date)` | `CREW` | Restaurant events and double-pay public holidays |
+| `get_employee_details(employee_id)` | `CREW` | Basic employee card info |
+| `get_employees_data_list(...)` | `CREW` | Paginated employee list for your restaurant |
+| `get_employee_shifts(from, to, [id])` | `CREW`* | Shift plans (`MANAGER` required to inspect other employees) |
+| `get_profile_verifications([id])` | `CREW`* | Station training verifications (`CT` required for other employees) |
+| `get_restaurant_shifts(from, to)` | `MANAGER` | Full shift roster across the entire restaurant |
+| `get_restaurant_floorplan(date)` | `MANAGER` | Station floorplan and shift allocations for a specific day |
+| `get_restaurant_availability(from, to)` | `MANAGER` | Employee availability matrix |
+| `get_employee_shift_stats(year, month, ids)` | `MANAGER` | Hours worked and shift statistics for employee IDs |
+| `get_expiring_verifications(from, to, ids)` | `MANAGER` | Verifications expiring in the specified date range |
+| `get_verification_attempt(attempt_id)` | `MANAGER` | Evaluator, points scored, and completion timestamp |
+| `get_all_employees_verification_summaries(...)` | `MANAGER` | Multi-threaded compilation of all staff verification statuses |
+
+---
+
 ## Disclaimer
 
-This project is **not affiliated with, endorsed by, or connected to McDonald's Corporation** or any of its subsidiaries. It is an independent, unofficial tool created for personal use. Use at your own risk and in compliance with the MyMcd platform's terms of service.
+This project is an independent tool created for internal shift synchronization and analytics. It is not affiliated with, maintained, or endorsed by McDonald's Corporation. Use responsibly in accordance with platform terms of use.

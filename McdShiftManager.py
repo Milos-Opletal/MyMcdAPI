@@ -1,201 +1,224 @@
+import logging
 import os
+import re
 import sqlite3
-import json
-from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from dotenv import load_dotenv
 from MyMcdAPI import MyMcdAPI
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
-
-# Assuming MyMcdAPI is imported or in the same file
-# from mymcd_api import MyMcdAPI, Role
 
 class McdShiftManager:
-    def __init__(self, api: MyMcdAPI, db_path: str = "mymcd_shifts.sqlite"):
+    """
+    High-level manager for syncing and querying McDonald's shifts in a local SQLite database.
+    Supports shift tracking, coworker overlap queries, and floorplan role lookups.
+    """
+
+    def __init__(self, api: Optional[MyMcdAPI] = None, db_path: str = "mymcd_shifts.sqlite"):
         self.api = api
         self.db_path = db_path
         self._init_db()
 
-    def _init_db(self):
-        """Initialize the SQLite database schema."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-                       CREATE TABLE IF NOT EXISTS shifts
-                       (
-                           id
-                           INTEGER
-                           PRIMARY
-                           KEY,
-                           employee_id
-                           INTEGER,
-                           full_name
-                           TEXT,
-                           date
-                           TEXT,
-                           start_time
-                           TEXT,
-                           end_time
-                           TEXT,
-                           note
-                           TEXT,
-                           UNIQUE
-                       (
-                           employee_id,
-                           date,
-                           start_time
-                       )
-                           )
-                       ''')
-        conn.commit()
-        conn.close()
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        return conn
+
+    def _init_db(self) -> None:
+        """Create the SQLite shifts table if it does not already exist."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS shifts (
+                    id INTEGER PRIMARY KEY,
+                    employee_id INTEGER,
+                    full_name TEXT,
+                    date TEXT,
+                    start_time TEXT,
+                    end_time TEXT,
+                    note TEXT
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_shifts_date ON shifts (date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_shifts_employee ON shifts (employee_id)')
+            conn.commit()
 
     # ==========================================
-    # FUNCTION 1: Sync all shifts to SQLite
+    # Shift Syncing
     # ==========================================
-    def sync_shifts(self, from_date: str, to_date: str):
+
+    def sync_shifts(self, from_date: str, to_date: str) -> None:
         """
-        Fetches shifts for all restaurant employees and saves them to the database.
-        Uses the manager-level restaurant overview for efficiency.
+        Fetch all restaurant shifts from the MyMcd API for a date range and save them to SQLite.
         """
-        print(f"Syncing shifts from {from_date} to {to_date}...")
+        if not self.api:
+            raise ValueError("MyMcdAPI instance must be provided to sync shifts.")
+
+        logger.info(f"Syncing shifts from {from_date} to {to_date}...")
         data = self.api.get_restaurant_shifts(from_date, to_date)
+        internal_employees = data.get("internalEmployees", [])
 
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            for emp in internal_employees:
+                e_id = emp.get("employeeId")
+                info = emp.get("employeeInfo", {})
+                name = info.get("fullName")
 
-        # [cite: 111-118] The restaurant shift endpoint returns 'internalEmployees'
-        # which contains employeeInfo and shiftPlans
-        employees = data.get("internalEmployees", [])
+                for shift in emp.get("shiftPlans", []):
+                    s_id = shift.get("id")
+                    shift_date = shift.get("date")
+                    note = shift.get("note")
 
-        for emp in employees:
-            info = emp.get("employeeInfo", {})
-            e_id = info.get("id")
-            name = info.get("fullName")
+                    for interval in shift.get("intervals", []):
+                        start = interval.get("from")
+                        end = interval.get("to")
 
-            for shift in emp.get("shiftPlans", []):
-                date = shift.get("date")
-                note = shift.get("note")
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO shifts (id, employee_id, full_name, date, start_time, end_time, note)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ''', (s_id, e_id, name, shift_date, start, end, note))
 
-                # [cite: 48-54] Shifts contain intervals with from/to timestamps
-                for interval in shift.get("intervals", []):
-                    start = interval.get("from")
-                    end = interval.get("to")
+            conn.commit()
+        logger.info("Restaurant shifts sync complete.")
 
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO shifts (employee_id, full_name, date, start_time, end_time, note)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    ''', (e_id, name, date, start, end, note))
+    def sync_floorplan(self, date: str) -> None:
+        """
+        Fetch the floorplan for a specific date and record all shifts (including unassigned/null employee ID shifts).
+        """
+        if not self.api:
+            raise ValueError("MyMcdAPI instance must be provided to sync floorplan.")
 
-        conn.commit()
-        conn.close()
-        print("Sync complete.")
+        try:
+            data = self.api.get_restaurant_floorplan(date)
+            position_groups = data.get("positionGroups", [])
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                for pg in position_groups:
+                    for row in pg.get("rows", []):
+                        emp_id = row.get("employeeId")
+                        emp_info = row.get("employeeInfo") or {}
+                        name = emp_info.get("fullName")
+
+                        shift_plan = row.get("shiftPlan")
+                        if shift_plan:
+                            s_id = shift_plan.get("id")
+                            date_str = shift_plan.get("date")
+                            note = shift_plan.get("note")
+
+                            for interval in shift_plan.get("intervals", []):
+                                start = interval.get("from")
+                                end = interval.get("to")
+
+                                cursor.execute('''
+                                    INSERT OR REPLACE INTO shifts (id, employee_id, full_name, date, start_time, end_time, note)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                ''', (s_id, emp_id, name, date_str, start, end, note))
+                conn.commit()
+            logger.info(f"Daily floorplan synced for date: {date}")
+        except Exception as e:
+            logger.error(f"Failed to sync floorplan for {date}: {e}")
+            raise
 
     # ==========================================
-    # FUNCTION 2: Get Special Roles (RS, OS, NS)
+    # Role & Coworker Queries
     # ==========================================
+
     def get_special_roles(self, date: str) -> Dict[str, Optional[str]]:
         """
-        Returns the names of the people assigned as RS, OS, and NS for a specific date.
-        Searches within the shift notes.
+        Returns names of employees assigned as RS (Restaurant Supervisor), OS (Open Supervisor),
+        or NS (Night Supervisor) for a specific date.
+        Gracefully extracts names from shift notes if employee_id is unassigned.
         """
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        roles: Dict[str, Optional[str]] = {"RS": None, "OS": None, "NS": None}
 
-        roles = {"RS": None, "OS": None, "NS": None}
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            for role in roles.keys():
+                cursor.execute('''
+                    SELECT full_name, note
+                    FROM shifts
+                    WHERE date = ?
+                      AND note LIKE ?
+                    LIMIT 1
+                ''', (date, f"%{role}%"))
+                result = cursor.fetchone()
+                if result:
+                    db_name, note = result
+                    if db_name:
+                        roles[role] = db_name
+                    elif note:
+                        cleaned = re.sub(rf'(?i)\b{role}\b', '', note).strip()
+                        cleaned = re.sub(r'\s*\d+[-:]\d+\s*', '', cleaned).strip()
+                        cleaned = cleaned.strip(" -:,;._")
+                        roles[role] = cleaned or None
 
-        for role in roles.keys():
-            #  Notes like "RS" are stored in the shift plan data
-            cursor.execute('''
-                           SELECT full_name
-                           FROM shifts
-                           WHERE date = ?
-                             AND note LIKE ?
-                               LIMIT 1
-                           ''', (date, f"%{role}%"))
-            result = cursor.fetchone()
-            if result:
-                roles[role] = result[0]
-
-        conn.close()
         return roles
 
-    # ==========================================
-    # FUNCTION 3: Get Coworker Times
-    # ==========================================
-    def get_coworker_shift_times(self, user_id: int, date: str) -> List[Dict]:
+    def get_coworker_shift_times(self, user_id: int, date: str) -> List[Dict[str, Any]]:
         """
-        Returns shifts of coworkers who are in the restaurant at the
-        same time as the specified user on a specific date.
+        Find all coworkers working during any shift intervals that overlap with the target user on a given date.
         """
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
 
-        # 1. Get the user's own shift intervals for this day
-        cursor.execute('''
-                       SELECT start_time, end_time
-                       FROM shifts
-                       WHERE employee_id = ? AND date = ?
-                       ''', (user_id, date))
-        user_shifts = cursor.fetchall()
+            # 1. Fetch user's shift intervals for that date
+            cursor.execute('''
+                SELECT start_time, end_time
+                FROM shifts
+                WHERE employee_id = ? AND date = ?
+            ''', (user_id, date))
+            user_shifts = cursor.fetchall()
 
-        if not user_shifts:
-            conn.close()
-            return []  # User isn't working, so they meet no one
+            if not user_shifts:
+                return []
 
-        # 2. Get all other shifts for the day
-        cursor.execute('''
-                       SELECT employee_id, full_name, start_time, end_time, note
-                       FROM shifts
-                       WHERE date = ? AND employee_id != ?
-                       ''', (date, user_id))
-        all_other_shifts = cursor.fetchall()
+            # 2. Find overlapping coworkers
+            coworkers: List[Dict[str, Any]] = []
+            for u_start, u_end in user_shifts:
+                cursor.execute('''
+                    SELECT employee_id, full_name, start_time, end_time, note
+                    FROM shifts
+                    WHERE date = ?
+                      AND employee_id != ?
+                      AND start_time < ?
+                      AND end_time > ?
+                ''', (date, user_id, u_end, u_start))
 
-        meeting_coworkers = []
+                for row in cursor.fetchall():
+                    coworkers.append({
+                        "employee_id": row[0],
+                        "full_name": row[1],
+                        "start_time": row[2],
+                        "end_time": row[3],
+                        "note": row[4]
+                    })
 
-        for coworker_shift in all_other_shifts:
-            c_start = coworker_shift['start_time']
-            c_end = coworker_shift['end_time']
+        # Deduplicate results
+        unique_coworkers: List[Dict[str, Any]] = []
+        seen = set()
+        for c in coworkers:
+            key = (c["employee_id"], c["start_time"], c["end_time"])
+            if key not in seen:
+                seen.add(key)
+                unique_coworkers.append(c)
 
-            # Check if this coworker's shift overlaps ANY of the user's shift intervals
-            overlaps = False
-            for u_shift in user_shifts:
-                u_start = u_shift['start_time']
-                u_end = u_shift['end_time']
-
-                # Mathematical overlap: Max(Starts) < Min(Ends)
-                # Or simply: (StartA < EndB) and (EndA > StartB)
-                if c_start < u_end and c_end > u_start:
-                    overlaps = True
-                    break
-
-            if overlaps:
-                meeting_coworkers.append(dict(coworker_shift))
-
-        conn.close()
-        # Sort by start time for a clean chronological list
-        return sorted(meeting_coworkers, key=lambda x: x['start_time'])
+        return unique_coworkers
 
 
-# ==========================================
-# EXAMPLE USAGE
-# ==========================================
 if __name__ == "__main__":
-    my_api = MyMcdAPI(os.environ["MYMCD_EMAIL"], os.environ["MYMCD_PASSWORD"])
-    my_api.login()
+    from dotenv import load_dotenv
+    load_dotenv()
 
-    app = McdShiftManager(my_api)
+    email = os.environ.get("MYMCD_EMAIL")
+    password = os.environ.get("MYMCD_PASSWORD")
 
-    app.sync_shifts("2026-03-01", "2026-03-31")
-
-    special_people = app.get_special_roles("2026-03-29")
-    print(f"Special Roles for today: {special_people}")
-
-    # 5. Find everyone else working today (excluding yourself)
-    others = app.get_coworker_shift_times(user_id=89600, date="2026-03-29")
-    for person in others:
-        print(f"{person['full_name']}: {person['start_time']} - {person['end_time']} ({person['note']})")
+    if email and password:
+        api_instance = MyMcdAPI(email, password)
+        api_instance.login()
+        shift_mgr = McdShiftManager(api_instance)
+        print("McdShiftManager initialized successfully with active session.")
+    else:
+        print("Please set MYMCD_EMAIL and MYMCD_PASSWORD in .env to test McdShiftManager.")
